@@ -626,6 +626,16 @@ var tokenTests = []tokenTest{
 		`<p a=/>`,
 		`<p a="/">`,
 	},
+	{
+		"duplicate attributes",
+		`<p foo="bar" foo="baz">`,
+		`<p foo="bar">`,
+	},
+	{
+		"duplicate attributes, different case",
+		`<p FOO="bar" foo="baz">`,
+		`<p foo="bar">`,
+	},
 }
 
 func TestTokenizer(t *testing.T) {
@@ -933,3 +943,69 @@ func benchmarkTokenizer(b *testing.B, level int) {
 func BenchmarkRawLevelTokenizer(b *testing.B)  { benchmarkTokenizer(b, rawLevel) }
 func BenchmarkLowLevelTokenizer(b *testing.B)  { benchmarkTokenizer(b, lowLevel) }
 func BenchmarkHighLevelTokenizer(b *testing.B) { benchmarkTokenizer(b, highLevel) }
+
+func TestUnicodeAttributeCase(t *testing.T) {
+	// <div a="1" A="1"> is resolved to <div a="1"> because a and A are considered
+	// duplicate attribute names. Different unicode cases are not considered equal
+	// though, so <div ä="1" Ä="1"> is tokenized as <div ä="1" Ä="1">.
+	f := `<div ä="1" Ä="1">`
+	z := NewTokenizer(strings.NewReader(f))
+	if tt := z.Next(); tt != StartTagToken {
+		t.Fatalf("expected StartTagToken, got %s", tt)
+	}
+	tok := z.Token()
+	if len(tok.Attr) != 2 {
+		t.Fatalf("expected 2 attributes, got %d", len(tok.Attr))
+	}
+	if tok.Attr[0].Key != "ä" {
+		t.Errorf("expected attribute key to be 'ä', got %s", tok.Attr[0].Key)
+	}
+	if tok.Attr[1].Key != "Ä" {
+		t.Errorf("expected attribute key to be 'Ä', got %s", tok.Attr[1].Key)
+	}
+}
+
+func TestParseDuplicateAttributes(t *testing.T) {
+	// Only the first occurrence of an attribute name (compared ASCII
+	// case-insensitively) is kept, as browsers do, so that code inspecting the
+	// parsed tree sees the same value that ends up being rendered and used.
+	const want = `<html><head></head><body><a href="javascript:alert(1)">x</a></body></html>`
+	for _, src := range []string{
+		`<a href="javascript:alert(1)" href="https://example.com/">x</a>`,
+		`<a href="javascript:alert(1)" HREF="https://example.com/">x</a>`,
+		`<a HREF="javascript:alert(1)" href="https://example.com/" hReF="https://example.org/">x</a>`,
+	} {
+		doc, err := Parse(strings.NewReader(src))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", src, err)
+		}
+		var anchor *Node
+		var find func(*Node)
+		find = func(n *Node) {
+			if anchor != nil {
+				return
+			}
+			if n.Type == ElementNode && n.Data == "a" {
+				anchor = n
+				return
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				find(c)
+			}
+		}
+		find(doc)
+		if anchor == nil {
+			t.Fatalf("Parse(%q): no <a> element found", src)
+		}
+		if len(anchor.Attr) != 1 || anchor.Attr[0].Key != "href" || anchor.Attr[0].Val != "javascript:alert(1)" {
+			t.Errorf("Parse(%q): got attributes %v, want only href=%q", src, anchor.Attr, "javascript:alert(1)")
+		}
+		var b strings.Builder
+		if err := Render(&b, doc); err != nil {
+			t.Fatalf("Render(%q): %v", src, err)
+		}
+		if got := b.String(); got != want {
+			t.Errorf("Render(Parse(%q)):\ngot  %s\nwant %s", src, got, want)
+		}
+	}
+}
